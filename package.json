@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npx tsc -b && vite build",
+    "build": "tsc -b && vite build",
     "preview": "vite preview --port 5173"
   },
   "dependencies": {
@@ -26,7 +26,8 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^2.5.2"
+    "tailwind-merge": "^2.5.2",
+    "typescript": "^5.5.4"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
@@ -37,7 +38,6 @@
     "tailwindcss": "^3.4.10",
     "tailwindcss-animate": "^1.0.7",
     "terser": "^5.44.0",
-    "typescript": "^5.5.4",
     "vite": "^5.4.1"
   }
 }
