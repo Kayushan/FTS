@@ -1,0 +1,21 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#3b82f6" stroke="#1e40af" stroke-width="8"/>
+  
+  <!-- Dollar sign -->
+  <text x="256" y="320" font-family="Arial, sans-serif" font-size="200" font-weight="bold" text-anchor="middle" fill="white">$</text>
+  
+  <!-- Chart bars -->
+  <rect x="120" y="180" width="30" height="60" fill="white" opacity="0.8"/>
+  <rect x="160" y="160" width="30" height="80" fill="white" opacity="0.8"/>
+  <rect x="200" y="140" width="30" height="100" fill="white" opacity="0.8"/>
+  <rect x="240" y="150" width="30" height="90" fill="white" opacity="0.8"/>
+  <rect x="280" y="130" width="30" height="110" fill="white" opacity="0.8"/>
+  <rect x="320" y="170" width="30" height="70" fill="white" opacity="0.8"/>
+  <rect x="360" y="190" width="30" height="50" fill="white" opacity="0.8"/>
+  
+  <!-- AI sparkle -->
+  <circle cx="380" cy="120" r="8" fill="#fbbf24"/>
+  <circle cx="400" cy="100" r="6" fill="#f59e0b"/>
+  <circle cx="360" cy="100" r="4" fill="#fbbf24"/>
+</svg>

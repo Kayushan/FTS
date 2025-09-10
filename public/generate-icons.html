@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Icon Generator</title>
+</head>
+<body>
+    <h1>FTS Icon Generator</h1>
+    <p>This page will generate the required PNG icons for the PWA.</p>
+    
+    <canvas id="canvas192" width="192" height="192" style="border: 1px solid #ccc; margin: 10px;"></canvas>
+    <canvas id="canvas512" width="512" height="512" style="border: 1px solid #ccc; margin: 10px;"></canvas>
+    
+    <br>
+    <button onclick="generateIcons()">Generate Icons</button>
+    <button onclick="downloadIcons()">Download Icons</button>
+    
+    <script>
+        function generateIcons() {
+            // Create SVG element
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', '512');
+            svg.setAttribute('height', '512');
+            svg.setAttribute('viewBox', '0 0 512 512');
+            
+            // Background circle
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', '256');
+            circle.setAttribute('cy', '256');
+            circle.setAttribute('r', '240');
+            circle.setAttribute('fill', '#3b82f6');
+            circle.setAttribute('stroke', '#1e40af');
+            circle.setAttribute('stroke-width', '8');
+            svg.appendChild(circle);
+            
+            // Dollar sign
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', '256');
+            text.setAttribute('y', '320');
+            text.setAttribute('font-family', 'Arial, sans-serif');
+            text.setAttribute('font-size', '200');
+            text.setAttribute('font-weight', 'bold');
+            text.setAttribute('text-anchor', 'middle');
+            text.setAttribute('fill', 'white');
+            text.textContent = '$';
+            svg.appendChild(text);
+            
+            // Chart bars
+            for (let i = 0; i < 7; i++) {
+                const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                rect.setAttribute('x', 120 + i * 40);
+                rect.setAttribute('y', 180 - i * 10);
+                rect.setAttribute('width', '30');
+                rect.setAttribute('height', 60 + i * 10);
+                rect.setAttribute('fill', 'white');
+                rect.setAttribute('opacity', '0.8');
+                svg.appendChild(rect);
+            }
+            
+            // AI sparkles
+            const sparkles = [
+                {cx: 380, cy: 120, r: 8, fill: '#fbbf24'},
+                {cx: 400, cy: 100, r: 6, fill: '#f59e0b'},
+                {cx: 360, cy: 100, r: 4, fill: '#fbbf24'}
+            ];
+            
+            sparkles.forEach(sparkle => {
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', sparkle.cx);
+                circle.setAttribute('cy', sparkle.cy);
+                circle.setAttribute('r', sparkle.r);
+                circle.setAttribute('fill', sparkle.fill);
+                svg.appendChild(circle);
+            });
+            
+            // Generate 192x192 icon
+            const canvas192 = document.getElementById('canvas192');
+            const ctx192 = canvas192.getContext('2d');
+            ctx192.fillStyle = '#3b82f6';
+            ctx192.fillRect(0, 0, 192, 192);
+            ctx192.fillStyle = 'white';
+            ctx192.font = 'bold 80px Arial';
+            ctx192.textAlign = 'center';
+            ctx192.fillText('$', 96, 120);
+            
+            // Generate 512x512 icon
+            const canvas512 = document.getElementById('canvas512');
+            const ctx512 = canvas512.getContext('2d');
+            ctx512.fillStyle = '#3b82f6';
+            ctx512.fillRect(0, 0, 512, 512);
+            ctx512.fillStyle = 'white';
+            ctx512.font = 'bold 200px Arial';
+            ctx512.textAlign = 'center';
+            ctx512.fillText('$', 256, 320);
+            
+            // Add chart bars
+            for (let i = 0; i < 7; i++) {
+                ctx192.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx192.fillRect(45 + i * 15, 68 - i * 4, 12, 24 + i * 4);
+                
+                ctx512.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx512.fillRect(120 + i * 40, 180 - i * 10, 30, 60 + i * 10);
+            }
+        }
+        
+        function downloadIcons() {
+            // Download 192x192 icon
+            const canvas192 = document.getElementById('canvas192');
+            const link192 = document.createElement('a');
+            link192.download = 'icon-192x192.png';
+            link192.href = canvas192.toDataURL();
+            link192.click();
+            
+            // Download 512x512 icon
+            const canvas512 = document.getElementById('canvas512');
+            const link512 = document.createElement('a');
+            link512.download = 'icon-512x512.png';
+            link512.href = canvas512.toDataURL();
+            link512.click();
+        }
+        
+        // Auto-generate on load
+        window.onload = generateIcons;
+    </script>
+</body>
+</html>
