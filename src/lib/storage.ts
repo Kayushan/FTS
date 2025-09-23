@@ -1,3 +1,6 @@
+import { FinancialMath } from './decimal-math';
+import { DateUtils } from './date-utils';
+
 export type EntryType = "expense" | "income";
 
 export type Entry = {
@@ -43,7 +46,7 @@ const DEBTS_KEY = "debts_v1";
 const BORROWS_KEY = "borrows_v1";
 
 export function formatDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
+  return DateUtils.formatDate(date);
 }
 
 export function getStartingBalance(dateKey: string): number | null {
@@ -54,10 +57,14 @@ export function getStartingBalance(dateKey: string): number | null {
 }
 
 export function getYesterdayEndingBalance(): number | null {
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayKey = formatDate(yesterday);
+  const yesterdayKey = DateUtils.getYesterdayKey();
   const yesterdayData = getDayData(yesterdayKey);
+  
+  // Only return balance if there's actual data for yesterday
+  if (yesterdayData.entries.length === 0 && yesterdayData.startingBalance === 0) {
+    return null;
+  }
+  
   const totals = calculateTotals(yesterdayData);
   return totals.remaining;
 }
@@ -84,9 +91,13 @@ export function saveDayData(day: DayData): void {
 }
 
 export function addEntry(dateKey: string, entry: Omit<Entry, "id" | "createdAt">): Entry {
+  // Ensure amount is properly rounded for financial calculations
+  const validatedAmount = FinancialMath.round(entry.amount);
+  
   const day = getDayData(dateKey);
   const newEntry: Entry = {
     ...entry,
+    amount: validatedAmount,
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
   };
@@ -110,9 +121,16 @@ export function updateEntry(
   const idx = day.entries.findIndex((e) => e.id === entryId);
   if (idx === -1) return null;
   const current = day.entries[idx];
+  
+  // Validate and round amount if it's being updated
+  const validatedUpdates = { ...updates };
+  if (updates.amount !== undefined) {
+    validatedUpdates.amount = FinancialMath.round(updates.amount);
+  }
+  
   const next: Entry = {
     ...current,
-    ...updates,
+    ...validatedUpdates,
   };
   day.entries[idx] = next;
   saveDayData(day);
@@ -133,29 +151,32 @@ export function getHistoryDates(): string[] {
 }
 
 export function calculateTotals(day: DayData): { income: number; expenses: number; remaining: number } {
-  const income = day.entries.filter((e) => e.type === "income").reduce((sum, e) => sum + e.amount, 0);
-  const expenses = day.entries.filter((e) => e.type === "expense").reduce((sum, e) => sum + e.amount, 0);
+  // Use decimal math for precise calculations
+  const incomeEntries = day.entries.filter((e) => e.type === "income");
+  const expenseEntries = day.entries.filter((e) => e.type === "expense");
+  
+  const income = FinancialMath.sum(incomeEntries.map(e => e.amount));
+  const expenses = FinancialMath.sum(expenseEntries.map(e => e.amount));
   
   // Include debts and borrows in balance calculation
-  const unpaidDebts = getDebts().filter((d) => d.status === "unpaid").reduce((sum, d) => sum + d.amount, 0);
-  const unpaidBorrows = getBorrows().filter((b) => b.status === "unpaid").reduce((sum, b) => sum + b.amount, 0);
+  const unpaidDebts = FinancialMath.sum(getDebts().filter((d) => d.status === "unpaid").map(d => d.amount));
+  const unpaidBorrows = FinancialMath.sum(getBorrows().filter((b) => b.status === "unpaid").map(b => b.amount));
   
-  // Correct logic:
-  // - Unpaid debts: You lent money (gave from your balance) → SUBTRACT from balance
-  // - Unpaid borrows: You borrowed money (received) → ADD to balance
-  const remaining = day.startingBalance + income - expenses - unpaidDebts + unpaidBorrows;
+  // Fixed logic: 
+  // - Unpaid debts: Money you lent out (reduces available balance)
+  // - Unpaid borrows: Money you received (increases available balance)
+  let remaining = day.startingBalance;
+  remaining = FinancialMath.add(remaining, income);
+  remaining = FinancialMath.subtract(remaining, expenses);
+  remaining = FinancialMath.subtract(remaining, unpaidDebts);
+  remaining = FinancialMath.add(remaining, unpaidBorrows);
   
-  // Debug logging
-  console.log("Balance calculation:", {
-    startingBalance: day.startingBalance,
-    income,
-    expenses,
-    unpaidDebts,
-    unpaidBorrows,
-    remaining
-  });
-  
-  return { income, expenses, remaining };
+  // Round all results to 2 decimal places
+  return { 
+    income: FinancialMath.round(income), 
+    expenses: FinancialMath.round(expenses), 
+    remaining: FinancialMath.round(remaining) 
+  };
 }
 
 export function eraseAllData(): void {
@@ -189,12 +210,15 @@ function saveDebts(debts: Debt[]): void {
 }
 
 export function addDebt(input: { person: string; amount: number; note?: string }): Debt {
+  // Ensure amount is properly rounded for financial calculations
+  const validatedAmount = FinancialMath.round(input.amount);
+  
   const debts = getDebts();
   const now = new Date().toISOString();
   const debt: Debt = {
     id: crypto.randomUUID(),
     person: input.person.trim(),
-    amount: input.amount,
+    amount: validatedAmount,
     note: input.note?.trim() || undefined,
     status: "unpaid",
     createdAt: now,
@@ -258,12 +282,15 @@ function saveBorrows(borrows: Borrow[]): void {
 }
 
 export function addBorrow(input: { person: string; amount: number; note?: string; dueDate?: string }): Borrow {
+  // Ensure amount is properly rounded for financial calculations
+  const validatedAmount = FinancialMath.round(input.amount);
+  
   const borrows = getBorrows();
   const now = new Date().toISOString();
   const borrow: Borrow = {
     id: crypto.randomUUID(),
     person: input.person.trim(),
-    amount: input.amount,
+    amount: validatedAmount,
     note: input.note?.trim() || undefined,
     dueDate: input.dueDate,
     status: "unpaid",

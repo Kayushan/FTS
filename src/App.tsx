@@ -13,7 +13,11 @@ import {
   setStartingBalance,
   type EntryType,
 } from "./lib/storage";
+import { InputValidator } from "./lib/validation";
 import { Button } from "./components/ui/button";
+import { LoadingProvider, useAsyncOperation } from "./contexts/LoadingContext";
+import { FormErrorDisplay, ApiErrorDisplay } from "./components/ui/ErrorDisplay";
+import { Loading } from "./components/ui/Loading";
 import {
   Select,
   SelectContent,
@@ -27,8 +31,9 @@ import { EntryItem } from "./components/EntryItem";
 import { formatRinggit } from "./lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "./components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "./components/ui/alert-dialog";
-import { eraseAllData } from "./lib/storage";
+import { DateUtils } from "./lib/date-utils";
 import { CategoryIcon } from "./lib/category-icons";
+import { eraseAllData } from "./lib/storage";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { DebtsView } from "./components/DebtsView";
 import { BorrowedView } from "./components/BorrowedView";
@@ -44,6 +49,13 @@ type FormState = {
   amount: string;
   category: string;
   note: string;
+};
+
+type ErrorState = {
+  sync: string | null;
+  form: string | null;
+  balance: string | null;
+  general: string | null;
 };
 
 const EXPENSE_CATEGORIES = [
@@ -71,9 +83,10 @@ function useTodayKey() {
   return { dateKey, setDateKey };
 }
 
-export default function App() {
+function AppContent() {
   const { dateKey, setDateKey } = useTodayKey();
   const { user, signOut } = useSupabaseAuth();
+  const { executeWithLoading } = useAsyncOperation();
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState<boolean>(() => localStorage.getItem("cloud_sync_enabled") === "1");
   const [syncStatus, setSyncStatus] = useState<"idle" | "pending" | "success" | "error">("idle");
   const [day, setDay] = useState<DayData>(() => getDayData(dateKey));
@@ -84,6 +97,12 @@ export default function App() {
   const [form, setForm] = useState<FormState>({ type: "expense", amount: "", category: EXPENSE_CATEGORIES[0], note: "" });
   const [showBalanceContinuation, setShowBalanceContinuation] = useState<boolean>(false);
   const [yesterdayBalance, setYesterdayBalance] = useState<number | null>(null);
+  const [errors, setErrors] = useState<ErrorState>({
+    sync: null,
+    form: null,
+    balance: null,
+    general: null
+  });
 
   useEffect(() => {
     setDay(getDayData(dateKey));
@@ -122,11 +141,22 @@ export default function App() {
   const hasStarting = getStartingBalance(dateKey) !== null;
 
   function handleSetStartingBalance() {
-    const value = Number(startingBalanceInput) || 0;
-    setStartingBalance(dateKey, value);
-    const updated = { ...day, startingBalance: value };
-    saveDayData(updated);
-    setDay(updated);
+    const validation = InputValidator.validateAmount(startingBalanceInput);
+    if (!validation.isValid) {
+      setErrors(prev => ({ ...prev, balance: validation.error || 'Invalid starting balance' }));
+      return;
+    }
+    
+    try {
+      setErrors(prev => ({ ...prev, balance: null }));
+      const value = validation.value || 0;
+      setStartingBalance(dateKey, value);
+      const updated = { ...day, startingBalance: value };
+      saveDayData(updated);
+      setDay(updated);
+    } catch (error) {
+      setErrors(prev => ({ ...prev, balance: 'Failed to set starting balance' }));
+    }
   }
 
   function handleContinueWithYesterdayBalance() {
@@ -148,31 +178,83 @@ export default function App() {
   async function triggerSync() {
     if (!cloudSyncEnabled || !user) return;
     try {
+      setErrors(prev => ({ ...prev, sync: null }));
       setSyncStatus("pending");
-      await performFullSync(user.id);
+      await executeWithLoading('sync', () => performFullSync(user.id));
       setSyncStatus("success");
       setTimeout(() => setSyncStatus("idle"), 1500);
-    } catch {
+    } catch (error) {
       setSyncStatus("error");
+      setErrors(prev => ({ 
+        ...prev, 
+        sync: error instanceof Error ? error.message : 'Sync failed. Please try again.' 
+      }));
     }
   }
 
-  function handleAddEntry() {
+  async function handleAddEntry() {
     if (!isToday) return;
-    const amount = Number(form.amount);
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    if (!form.category.trim()) return;
-    addEntry(dateKey, { type: form.type, amount, category: form.category.trim(), note: form.note.trim() });
-    setDay(getDayData(dateKey));
-    setForm({ ...form, amount: "", note: "" });
-    triggerSync();
+    
+    try {
+      setErrors(prev => ({ ...prev, form: null }));
+      
+      // Validate amount using InputValidator
+      const amountValidation = InputValidator.validateAmount(form.amount);
+      if (!amountValidation.isValid) {
+        setErrors(prev => ({ ...prev, form: amountValidation.error || 'Invalid amount' }));
+        return;
+      }
+      
+      // Validate category
+      const categoryValidation = InputValidator.validateCategory(
+        form.category, 
+        form.type === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES
+      );
+      if (!categoryValidation.isValid) {
+        setErrors(prev => ({ ...prev, form: categoryValidation.error || 'Invalid category' }));
+        return;
+      }
+      
+      // Validate note (optional)
+      const noteValidation = InputValidator.validateNote(form.note);
+      if (!noteValidation.isValid) {
+        setErrors(prev => ({ ...prev, form: noteValidation.error || 'Invalid note' }));
+        return;
+      }
+      
+      const amount = amountValidation.value!;
+      const category = categoryValidation.value!;
+      const note = noteValidation.value;
+      
+      await executeWithLoading('add-entry', async () => {
+        addEntry(dateKey, { type: form.type, amount, category, note });
+        setDay(getDayData(dateKey));
+        setForm({ ...form, amount: "", note: "" });
+      });
+      
+      triggerSync();
+    } catch (error) {
+      setErrors(prev => ({ 
+        ...prev, 
+        form: error instanceof Error ? error.message : 'Failed to add entry' 
+      }));
+    }
   }
 
-  function handleDelete(id: string) {
+  async function handleDelete(id: string) {
     if (!isToday) return;
-    deleteEntry(dateKey, id);
-    setDay(getDayData(dateKey));
-    triggerSync();
+    try {
+      await executeWithLoading('delete-entry', async () => {
+        deleteEntry(dateKey, id);
+        setDay(getDayData(dateKey));
+      });
+      triggerSync();
+    } catch (error) {
+      setErrors(prev => ({ 
+        ...prev, 
+        general: error instanceof Error ? error.message : 'Failed to delete entry' 
+      }));
+    }
   }
 
   return (
@@ -203,7 +285,7 @@ export default function App() {
                 <Calendar
                   mode="single"
                   selected={new Date(dateKey)}
-                  onSelect={(d) => d && setDateKey(d.toISOString().slice(0, 10))}
+                  onSelect={(d) => d && setDateKey(DateUtils.formatDate(d))}
                   disabled={(d) => d > new Date()}
                   initialFocus
                 />
@@ -247,14 +329,21 @@ export default function App() {
                     </div>
                   ) : null}
 
+                  {errors.sync && (
+                    <ApiErrorDisplay
+                      error={errors.sync}
+                      onRetry={() => triggerSync()}
+                      onDismiss={() => setErrors(prev => ({ ...prev, sync: null }))}
+                    />
+                  )}
+
                   {cloudSyncEnabled && user ? (
                     <Button
                       variant="secondary"
                       className="w-full"
                       onClick={() => triggerSync()}
-                      disabled={syncStatus === "pending"}
                     >
-                      {syncStatus === "pending" ? "Syncing..." : "Sync now"}
+                      "Sync now"
                     </Button>
                   ) : null}
 
@@ -277,15 +366,23 @@ export default function App() {
                           <Button
                             variant="destructive"
                             onClick={async () => {
-                              if (user) {
-                                try { await eraseAllCloudData(user.id); } catch {}
+                              try {
+                                if (user) {
+                                  await executeWithLoading('erase-data', () => eraseAllCloudData(user.id));
+                                }
+                                eraseAllData();
+                                setDay(getDayData(dateKey));
+                                setStartingBalanceInput("");
+                              } catch (error) {
+                                setErrors(prev => ({ 
+                                  ...prev, 
+                                  general: 'Failed to erase data completely' 
+                                }));
                               }
-                              eraseAllData();
-                              setDay(getDayData(dateKey));
-                              setStartingBalanceInput("");
                             }}
+                            disabled={false}
                           >
-                            Erase
+                            'Erase'
                           </Button>
                         </AlertDialogAction>
                       </AlertDialogFooter>
@@ -301,13 +398,20 @@ export default function App() {
       <Tabs defaultValue="tracker">
         <TabsList className="w-full overflow-x-auto">
           <TabsTrigger value="tracker" className="flex-1">Tracker</TabsTrigger>
-          <TabsTrigger value="debts" className="flex-1">Debt</TabsTrigger>
-          <TabsTrigger value="borrowed" className="flex-1">Borrowed</TabsTrigger>
+          <TabsTrigger value="debts" className="flex-1">Receivables</TabsTrigger>
+          <TabsTrigger value="borrowed" className="flex-1">Payables</TabsTrigger>
           <TabsTrigger value="advisor" className="flex-1">AI Advisor</TabsTrigger>
           <TabsTrigger value="api-keys" className="flex-1">API Keys</TabsTrigger>
         </TabsList>
 
         <TabsContent value="tracker" className="space-y-2">
+          {errors.general && (
+            <ApiErrorDisplay
+              error={errors.general}
+              onDismiss={() => setErrors(prev => ({ ...prev, general: null }))}
+            />
+          )}
+
           {showBalanceContinuation && (
             <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 p-6 shadow-lg">
               <div className="text-lg font-semibold text-blue-900 mb-2">🌅 New Day - Balance Continuation</div>
@@ -333,23 +437,58 @@ export default function App() {
           )}
           
           {isToday && !hasStarting && !showBalanceContinuation && (
-            <div className="rounded-2xl bg-gradient-to-br from-gray-50 to-slate-50 border border-gray-200 p-6 shadow-lg">
-              <div className="text-lg font-semibold text-gray-900 mb-2">💰 Set Starting Balance</div>
-              <div className="text-sm text-gray-600 mb-4">Enter your starting balance for today</div>
-              <div className="flex gap-3">
-                <input
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  className="flex-1 rounded-xl border-2 border-gray-300 px-4 py-3 text-lg font-medium focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all duration-200"
-                  value={startingBalanceInput}
-                  onChange={(e) => setStartingBalanceInput(e.target.value)}
-                />
-                <Button 
-                  onClick={handleSetStartingBalance}
-                  className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-medium px-6 py-3 rounded-xl shadow-md hover:shadow-lg transition-all duration-200"
-                >
-                  ✅ Set
-                </Button>
+            <div className="rounded-lg bg-white border border-gray-200 p-6 shadow-sm hover:shadow-md transition-shadow duration-200">
+              <div className="flex items-start space-x-3">
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
+                    </svg>
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-base font-semibold text-gray-900 mb-1">Set Starting Balance</h3>
+                  <p className="text-sm text-gray-600 mb-4">Enter your account balance to begin tracking your finances today</p>
+                  
+                  {errors.balance && (
+                    <FormErrorDisplay error={errors.balance} fieldName="Starting Balance" />
+                  )}
+                  
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="flex-1">
+                      <label htmlFor="starting-balance" className="sr-only">Starting balance amount</label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                          <span className="text-gray-500 text-sm">RM</span>
+                        </div>
+                        <input
+                          id="starting-balance"
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          className="block w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200 bg-gray-50 focus:bg-white"
+                          value={startingBalanceInput}
+                          onChange={(e) => {
+                            setStartingBalanceInput(e.target.value);
+                            if (errors.balance) {
+                              setErrors(prev => ({ ...prev, balance: null }));
+                            }
+                          }}
+                          aria-label="Starting balance amount"
+                          aria-describedby="starting-balance-error"
+                        />
+                      </div>
+                    </div>
+                    <button 
+                      onClick={handleSetStartingBalance}
+                      className="inline-flex items-center justify-center px-6 py-3 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors duration-200 shadow-sm hover:shadow-md"
+                    >
+                      <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Set Balance
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -391,18 +530,33 @@ export default function App() {
                 Income
               </Button>
             </div>
+            
+            {errors.form && (
+              <FormErrorDisplay error={errors.form} fieldName="Entry" />
+            )}
+            
             <div className="flex gap-2">
               <input
                 inputMode="decimal"
                 placeholder="Amount"
-                className="w-28 rounded-md border px-3 py-2"
+                className="w-28 rounded-md border px-3 py-2 focus:ring-2 focus:ring-blue-200 focus:border-blue-500"
                 value={form.amount}
                 disabled={!isToday}
-                onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))}
+                onChange={(e) => {
+                  setForm((f) => ({ ...f, amount: e.target.value }));
+                  if (errors.form) {
+                    setErrors(prev => ({ ...prev, form: null }));
+                  }
+                }}
+                aria-label="Entry amount"
               />
               <div className="flex-1">
-                <Select value={form.category} onValueChange={(v) => setForm((f) => ({ ...f, category: v }))} disabled={!isToday}>
-                  <SelectTrigger>
+                <Select 
+                  value={form.category} 
+                  onValueChange={(v) => setForm((f) => ({ ...f, category: v }))} 
+                  disabled={!isToday}
+                >
+                  <SelectTrigger aria-label="Select category">
                     <SelectValue placeholder="Select category" />
                   </SelectTrigger>
                   <SelectContent>
@@ -420,13 +574,18 @@ export default function App() {
             </div>
             <input
               placeholder="Note (optional)"
-              className="w-full rounded-md border px-3 py-2"
+              className="w-full rounded-md border px-3 py-2 focus:ring-2 focus:ring-blue-200 focus:border-blue-500"
               value={form.note}
               disabled={!isToday}
               onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+              aria-label="Entry note"
             />
-            <Button className="w-full" onClick={handleAddEntry} disabled={!isToday}>
-              Add {form.type}
+            <Button 
+              className="w-full" 
+              onClick={handleAddEntry} 
+              disabled={!isToday}
+            >
+              {form.type === "expense" ? "Add Expense" : "Add Income"}
             </Button>
           </div>
 
@@ -439,11 +598,28 @@ export default function App() {
 
           <section className="space-y-2">
             <h2 className="text-sm font-medium text-muted-foreground">Entries</h2>
-            <ul className="space-y-2">
+            {false && (
+              <div className="flex items-center justify-center p-4">
+                <Loading variant="spinner" size="md" />
+                <span className="ml-2 text-sm text-muted-foreground">Deleting entry...</span>
+              </div>
+            )}
+            <ul className="space-y-2" role="list" aria-label="Transaction entries">
               {day.entries.map((e) => (
-                <EntryItem key={e.id} entry={e} onDelete={handleDelete} readOnly={!isToday} />
+                <EntryItem 
+                  key={e.id} 
+                  entry={e} 
+                  onDelete={handleDelete} 
+                  readOnly={!isToday}
+                />
               ))}
             </ul>
+            {day.entries.length === 0 && (
+              <div className="text-center py-8 text-muted-foreground">
+                <p>No entries for this day</p>
+                {isToday && <p className="text-sm mt-1">Add your first transaction above</p>}
+              </div>
+            )}
           </section>
 
           <section className="rounded-xl bg-card p-4 shadow-sm transition-shadow hover:shadow-md">
@@ -475,6 +651,14 @@ export default function App() {
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <LoadingProvider>
+      <AppContent />
+    </LoadingProvider>
   );
 }
 

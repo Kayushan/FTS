@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import { addBorrow, getBorrows, markBorrowPaid, setBorrowStatus, type Borrow } from "../lib/storage";
+import { InputValidator } from "../lib/validation";
+import { DateUtils } from "../lib/date-utils";
 import { Button } from "./ui/button";
 import { formatRinggit } from "../lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
@@ -24,7 +26,7 @@ export function BorrowedView() {
     });
   }, [borrows]);
   const paid = useMemo(() => borrows.filter((b) => b.status === "paid"), [borrows]);
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayKey = DateUtils.getTodayKey();
 
   function parseYmd(ymd: string): Date {
     const [y, m, d] = ymd.split("-").map((n) => Number(n));
@@ -40,9 +42,41 @@ export function BorrowedView() {
   const DUE_SOON_DAYS = 3;
 
   function handleAdd() {
-    const amt = Number(amount);
-    if (!person.trim() || !Number.isFinite(amt) || amt <= 0) return;
-    addBorrow({ person: person.trim(), amount: amt, note: note.trim() || undefined, dueDate });
+    // Validate person name
+    const personValidation = InputValidator.validatePersonName(person);
+    if (!personValidation.isValid) {
+      console.error('Invalid person name:', personValidation.error);
+      return;
+    }
+    
+    // Validate amount
+    const amountValidation = InputValidator.validateAmount(amount);
+    if (!amountValidation.isValid) {
+      console.error('Invalid amount:', amountValidation.error);
+      return;
+    }
+    
+    // Validate note (optional)
+    const noteValidation = InputValidator.validateNote(note);
+    if (!noteValidation.isValid) {
+      console.error('Invalid note:', noteValidation.error);
+      return;
+    }
+    
+    // Validate due date (optional)
+    if (dueDate) {
+      const date = new Date(dueDate);
+      if (isNaN(date.getTime())) {
+        console.error('Invalid due date: Invalid date format');
+        return;
+      }
+    }
+    
+    const validatedAmount = amountValidation.value!;
+    const validatedPerson = personValidation.value!;
+    const validatedNote = noteValidation.value;
+    
+    addBorrow({ person: validatedPerson, amount: validatedAmount, note: validatedNote, dueDate });
     setBorrows(getBorrows());
     // Dispatch event to update main balance
     window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "borrow" } }));
@@ -66,7 +100,7 @@ export function BorrowedView() {
   return (
     <div className="space-y-4">
       <div className="rounded-xl bg-card p-4 shadow-sm space-y-3">
-        <div className="text-sm text-muted-foreground">Add Borrowed</div>
+        <div className="text-sm text-muted-foreground">Add Payable</div>
         <div className="flex gap-2">
           <input className="flex-1 rounded-md border px-3 py-2" placeholder="Person" value={person} onChange={(e) => setPerson(e.target.value)} />
           <input className="w-28 rounded-md border px-3 py-2" placeholder="Amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
@@ -81,19 +115,19 @@ export function BorrowedView() {
               <Calendar
                 mode="single"
                 selected={dueDate ? new Date(dueDate) : undefined}
-                onSelect={(d) => setDueDate(d ? d.toISOString().slice(0,10) : undefined)}
+                onSelect={(d) => setDueDate(d ? DateUtils.formatDate(d) : undefined)}
                 initialFocus
               />
             </PopoverContent>
           </Popover>
         </div>
-        <Button className="w-full" onClick={handleAdd}>Add Borrowed</Button>
+        <Button className="w-full" onClick={handleAdd}>Add Payable</Button>
       </div>
 
       {unpaid.length > 0 && (
         <section className="space-y-2">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Unpaid</div>
+            <div className="text-sm font-medium">Outstanding</div>
             <div className="inline-flex gap-1">
               <Button size="sm" variant={filter === "all" ? "secondary" : "outline"} onClick={() => setFilter("all")}>All</Button>
               <Button size="sm" variant={filter === "overdue" ? "secondary" : "outline"} onClick={() => setFilter("overdue")}>Overdue</Button>

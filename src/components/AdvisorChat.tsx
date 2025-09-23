@@ -18,8 +18,12 @@ import {
   MessageCircle,
 } from "lucide-react";
 import { useSupabaseAuth } from "../lib/auth";
-import { addEntry, deleteEntry, updateEntry, addDebt, addBorrow, markDebtPaid, markBorrowPaid, setDebtStatus, setBorrowStatus } from "../lib/storage";
+import { addEntry, addDebt, addBorrow } from "../lib/storage";
 import { loadChat, saveChat } from "../lib/chat_store";
+import { FinancialMath } from "../lib/decimal-math";
+import { AICommandParser } from "../lib/ai-command-parser";
+import { AIErrorHandler, type AIError } from "../lib/ai-error-handler";
+import { ApiErrorDisplay } from "./ui/ErrorDisplay";
 
 type ChatBubble = { role: "user" | "assistant"; content: string };
 
@@ -35,6 +39,7 @@ export function AdvisorChat() {
   const [loading, setLoading] = useState(false);
   const [genLoading, setGenLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<AIError | null>(null);
   const [needsRefresh, setNeedsRefresh] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const statusFeed = useAiStatusFeed();
@@ -82,8 +87,14 @@ export function AdvisorChat() {
     try {
       setGenLoading(true);
       setError(null);
+      setAiError(null);
       pushAiStatus({ scope: "structurer", stage: "start", message: "User requested summary refresh" });
-      await summarizeLast30Days(user.id);
+      
+      await AIErrorHandler.withRetry(
+        () => summarizeLast30Days(user.id),
+        'Refresh insights'
+      );
+      
       const { data } = await supabase
         .from("user_insights")
         .select("summary, created_at")
@@ -94,7 +105,12 @@ export function AdvisorChat() {
       setInsights(data?.summary ?? null);
       setNeedsRefresh(false);
     } catch (e: any) {
-      setError(e?.message ?? "Failed to refresh summary");
+      if (e.code) {
+        // It's an AIError from AIErrorHandler
+        setAiError(e);
+      } else {
+        setError(e?.message ?? "Failed to refresh summary");
+      }
     } finally {
       setGenLoading(false);
     }
@@ -154,7 +170,10 @@ export function AdvisorChat() {
     }
     setLoading(true);
     setShowTyping(true);
+    setError(null);
+    setAiError(null);
     // Clear processed transactions for new conversation
+    AICommandParser.clearProcessedCommands();
     processedTransactions.current.clear();
     pushAiStatus({ scope: "advisor", stage: "sending_question", message: "Sending question to OpenRouter" });
     const systemPrompt = getAdvisorSystem();
@@ -184,214 +203,138 @@ export function AdvisorChat() {
           return copy;
         });
       };
-      await callOpenRouterStream(history, apiKeys, getAiModel(), async (delta) => {
-        deltaToState(delta);
-        if (!superAi) {
-          console.log("Super AI not enabled, skipping transaction parsing"); // Debug log
-          return;
-        }
-        console.log("Super AI enabled, checking for __apply__ commands"); // Debug log
-        // Parse inline commands when super AI is enabled
-        const lower = assembled.toLowerCase();
-        // Simple patterns: add/edit/delete commands the model might emit in plain text
-        // e.g., "add expense 12.50 category Food note Lunch today"
-        // For safety, only act when it includes keywords and amounts
-        console.log("Checking for __apply__ in:", lower); // Debug log
-        if (lower.includes("__apply__")) {
-          // Models can emit a JSON block like: __apply__ { action: "add", date: "YYYY-MM-DD", type: "expense", amount: 12.5, category: "Food", note: "Lunch" }
-          console.log("Found __apply__ in response:", assembled); // Debug log
-          const start = assembled.indexOf("__apply__");
-          console.log("__apply__ found at position:", start); // Debug log
-          if (start !== -1) {
-            const jsonStart = assembled.indexOf("{", start);
-            if (jsonStart !== -1) {
-              // Find the matching closing brace by counting braces
-              let braceCount = 0;
-              let jsonEnd = -1;
-              for (let i = jsonStart; i < assembled.length; i++) {
-                if (assembled[i] === '{') braceCount++;
-                if (assembled[i] === '}') braceCount--;
-                if (braceCount === 0) {
-                  jsonEnd = i;
-                  break;
-                }
-              }
-              
-              if (jsonEnd !== -1) {
-                try {
-                  const jsonString = assembled.slice(jsonStart, jsonEnd + 1).trim();
-                  console.log("Parsing JSON:", jsonString); // Debug log
-                  const payload = JSON.parse(jsonString);
-                  console.log("Parsed payload:", payload); // Debug log
-                  
-                  // Normalize action to correctly route transactions vs debts vs borrows
-                  let normalizedAction = String(payload.action || "").toLowerCase();
-                  // Heuristics: if model used generic "add" for non-transaction records
-                  if (normalizedAction === "add" || normalizedAction === "create") {
-                    if (payload.type && (payload.category || payload.amount)) {
-                      normalizedAction = "add_transaction";
-                    } else if (payload.person && payload.dueDate) {
-                      normalizedAction = "add_borrow";
-                    } else if (payload.person && !payload.type) {
-                      // Use text context to disambiguate borrow vs debt
-                      if (lower.includes("borrow") || lower.includes(" i owe") || lower.includes("i owe ") || lower.includes(" owe ")) {
-                        normalizedAction = "add_borrow";
-                      } else {
-                        normalizedAction = "add_debt";
-                      }
-                    }
-                  }
+      await AIErrorHandler.withRetry(
+        () => callOpenRouterStream(history, apiKeys, getAiModel(), async (delta) => {
+          deltaToState(delta);
+          if (!superAi) {
+            console.log("Super AI not enabled, skipping transaction parsing");
+            return;
+          }
+          console.log("Super AI enabled, checking for __apply__ commands");
+          
+          // Enhanced AI command parsing with error handling
+          const commands = await AIErrorHandler.withRetry(
+            () => Promise.resolve(AICommandParser.parseCommand(assembled, processedTransactions.current)),
+            'AI command parsing'
+          ).catch((error: AIError) => {
+            console.error('AI command parsing failed:', error);
+            setAiError(error);
+            return [];
+          });
+        
+        for (const commandResult of commands) {
+          if (!commandResult.success) {
+            console.error('Command validation failed:', commandResult.error);
+            setMessages((prev) => [...prev, { 
+              role: "assistant", 
+              content: `⚠️ **Command Error**: ${commandResult.error}` 
+            }]);
+            continue;
+          }
+          
+          const command = commandResult.command!;
+          const commandId = commandResult.commandId || AICommandParser.generateCommandId(command);
+          
+          // Enhanced duplicate prevention
+          if (processedTransactions.current.has(commandId)) {
+            console.log("Command already processed, skipping:", commandId);
+            continue;
+          }
+          
+          const currentDate = getCurrentDateString();
+          const dateKey = currentDate;
+          
+          try {
+            // Execute command with enhanced error handling
+            await AIErrorHandler.withRetry(async () => {
+              switch (command.action) {
+              case "add_transaction":
+                addEntry(dateKey, { 
+                  type: command.type!, 
+                  amount: command.amount!, 
+                  category: command.category!, 
+                  note: command.note 
+                });
+                window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { date: dateKey } }));
+                console.log("Transaction added successfully");
+                
+                processedTransactions.current.add(commandId);
+                setMessages((prev) => [...prev, { 
+                  role: "assistant", 
+                  content: `✅ **Transaction Successfully Added!**
 
-                  // Create a unique identifier for this operation to prevent duplicates
-                  let transactionId = "";
-                  switch (normalizedAction) {
-                    case "add_transaction":
-                      transactionId = `${normalizedAction}-${payload.type}-${payload.amount}-${payload.category}-${payload.note || ''}-${payload.date || ''}`;
-                      break;
-                    case "edit_transaction":
-                      transactionId = `${normalizedAction}-${payload.entryId || ''}-${payload.amount || ''}-${payload.category || ''}-${payload.note || ''}`;
-                      break;
-                    case "delete_transaction":
-                      transactionId = `${normalizedAction}-${payload.entryId || ''}`;
-                      break;
-                    case "add_debt":
-                      transactionId = `${normalizedAction}-${payload.person || ''}-${payload.amount || ''}-${payload.note || ''}`;
-                      break;
-                    case "add_borrow":
-                      transactionId = `${normalizedAction}-${payload.person || ''}-${payload.amount || ''}-${payload.note || ''}-${payload.dueDate || ''}`;
-                      break;
-                    case "mark_debt_paid":
-                    case "delete_debt":
-                      transactionId = `${normalizedAction}-${payload.debtId || ''}`;
-                      break;
-                    case "mark_borrow_paid":
-                    case "delete_borrow":
-                      transactionId = `${normalizedAction}-${payload.borrowId || ''}`;
-                      break;
-                    default:
-                      transactionId = `${String(payload.action || '').toLowerCase()}-${payload.type || ''}-${payload.amount || ''}-${payload.category || ''}-${payload.note || ''}-${payload.date || ''}-${payload.person || ''}-${payload.dueDate || ''}`;
-                  }
-                  
-                  // Check if we've already processed this exact transaction
-                  if (processedTransactions.current.has(transactionId)) {
-                    console.log("Transaction already processed, skipping:", transactionId);
-                    return;
-                  }
-                  
-                  const currentDate = getCurrentDateString();
-                  // Force correct date - always use today's date for "today" requests
-                  const dateKey = currentDate;
-                  
-                  // Validate date
-                  if (payload.date && payload.date !== currentDate) {
-                    console.warn(`Date mismatch: AI provided ${payload.date}, but today is ${currentDate}. Using today's date instead.`);
-                  }
-                  
-                  // Handle different action types
-                  if (normalizedAction === "add_transaction") {
-                  addEntry(dateKey, { type: payload.type, amount: Number(payload.amount), category: String(payload.category), note: payload.note ? String(payload.note) : undefined });
-                  window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { date: dateKey } }));
-                    console.log("Transaction added successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Transaction Successfully Added!**\n\nYour transaction has been processed and added to your FTS account.\nDate: ${dateKey}` }]);
-                  } else if (normalizedAction === "delete_transaction" || (payload.action === "delete" && payload.entryId)) {
-                  deleteEntry(dateKey, String(payload.entryId));
-                  window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { date: dateKey } }));
-                    console.log("Transaction deleted successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                  } else if (normalizedAction === "edit_transaction" || (payload.action === "edit" && payload.entryId)) {
-                  updateEntry(dateKey, String(payload.entryId), { type: payload.type, amount: payload.amount ? Number(payload.amount) : undefined, category: payload.category, note: payload.note });
-                  window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { date: dateKey } }));
-                    console.log("Transaction updated successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                  } else if (normalizedAction === "add_debt") {
-                    addDebt({ 
-                      person: String(payload.person), 
-                      amount: Number(payload.amount), 
-                      note: payload.note ? String(payload.note) : undefined 
-                    });
-                    window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "debt" } }));
-                    console.log("Debt added successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Debt Successfully Added!**\n\n${payload.person} owes you RM ${payload.amount.toFixed(2)}.\nStatus: Unpaid` }]);
-                  } else if (normalizedAction === "add_borrow") {
-                    addBorrow({ 
-                      person: String(payload.person), 
-                      amount: Number(payload.amount), 
-                      note: payload.note ? String(payload.note) : undefined,
-                      dueDate: payload.dueDate ? String(payload.dueDate) : undefined
-                    });
-                    window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "borrow" } }));
-                    console.log("Borrow added successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Borrow Successfully Added!**\n\nYou owe ${payload.person} RM ${payload.amount.toFixed(2)}.\nStatus: Unpaid${payload.dueDate ? `\nDue Date: ${payload.dueDate}` : ''}` }]);
-                  } else if (normalizedAction === "mark_debt_paid" && payload.debtId) {
-                    markDebtPaid(String(payload.debtId));
-                    window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "debt" } }));
-                    console.log("Debt marked as paid successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Debt Marked as Paid!**\n\nDebt has been marked as paid and income record created.` }]);
-                  } else if (normalizedAction === "mark_borrow_paid" && payload.borrowId) {
-                    markBorrowPaid(String(payload.borrowId));
-                    window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "borrow" } }));
-                    console.log("Borrow marked as paid successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Borrow Marked as Paid!**\n\nBorrow has been marked as paid and expense record created.` }]);
-                  } else if (normalizedAction === "delete_debt" && payload.debtId) {
-                    // Note: There's no deleteDebt function in storage.ts, so we'll mark as paid instead
-                    setDebtStatus(String(payload.debtId), "paid");
-                    window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "debt" } }));
-                    console.log("Debt status updated successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Debt Status Updated!**\n\nDebt has been marked as paid.` }]);
-                  } else if (normalizedAction === "delete_borrow" && payload.borrowId) {
-                    // Note: There's no deleteBorrow function in storage.ts, so we'll mark as paid instead
-                    setBorrowStatus(String(payload.borrowId), "paid");
-                    window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "borrow" } }));
-                    console.log("Borrow status updated successfully"); // Debug log
-                    
-                    // Mark this transaction as processed
-                    processedTransactions.current.add(transactionId);
-                    
-                    // Add a success message to the chat
-                    setMessages((prev) => [...prev, { role: "assistant", content: `✅ **Borrow Status Updated!**\n\nBorrow has been marked as paid.` }]);
-                  }
-                } catch (error) {
-                  console.error("JSON parsing error:", error); // Debug log
-                }
-              }
+Amount: RM ${FinancialMath.toFixed(command.amount!)}
+Category: ${command.category}
+Date: ${dateKey}` 
+                }]);
+                break;
+                
+              case "add_debt":
+                addDebt({ 
+                  person: command.person!, 
+                  amount: command.amount!, 
+                  note: command.note 
+                });
+                window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "debt" } }));
+                console.log("Receivable added successfully");
+                
+                processedTransactions.current.add(commandId);
+                setMessages((prev) => [...prev, { 
+                  role: "assistant", 
+                  content: `✅ **Receivable Successfully Added!**
+
+${command.person} owes you RM ${FinancialMath.toFixed(command.amount!)}.
+Status: Outstanding` 
+                }]);
+                break;
+                
+              case "add_borrow":
+                addBorrow({ 
+                  person: command.person!, 
+                  amount: command.amount!, 
+                  note: command.note,
+                  dueDate: command.dueDate
+                });
+                window.dispatchEvent(new CustomEvent("fts-data-changed", { detail: { type: "borrow" } }));
+                console.log("Payable added successfully");
+                
+                processedTransactions.current.add(commandId);
+                setMessages((prev) => [...prev, { 
+                  role: "assistant", 
+                  content: `✅ **Payable Successfully Added!**
+
+You owe ${command.person} RM ${FinancialMath.toFixed(command.amount!)}.
+Status: Outstanding${command.dueDate ? `
+Due Date: ${command.dueDate}` : ''}` 
+                }]);
+                break;
+                
+              // Add other cases as needed for edit, delete, etc.
+              default:
+                throw new Error(`Unknown action: ${command.action}`);
+            }
+            }, `Execute AI command: ${command.action}`);
+            
+            // Mark command as processed
+            processedTransactions.current.add(commandId);
+            
+          } catch (error) {
+            console.error('Error executing AI command:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            setMessages((prev) => [...prev, { 
+              role: "assistant", 
+              content: `❌ **Error processing command**: ${errorMessage}` 
+            }]);
+            
+            // Set AI error for user feedback
+            if (error instanceof Error && error.name === 'AIError') {
+              setAiError(error as any);
             }
           }
         }
-      });
+        }),
+        'AI streaming request'
+      );
       pushAiStatus({ scope: "advisor", stage: "received_answer", message: "Received advisor response" });
       setInput("");
     } finally {
@@ -422,6 +365,18 @@ export function AdvisorChat() {
         {!user && <span className="text-red-600">Sign in required</span>}
       </div>
       {error && <div className="p-3 border-b text-xs text-red-700">{error}</div>}
+      {aiError && (
+        <div className="p-3 border-b">
+          <ApiErrorDisplay
+            error={AIErrorHandler.getUserMessage(aiError)}
+            onRetry={AIErrorHandler.shouldShowRetry(aiError) ? () => {
+              setAiError(null);
+              // Retry the last operation if needed
+            } : undefined}
+            onDismiss={() => setAiError(null)}
+          />
+        </div>
+      )}
       <div ref={viewportRef} className="flex-1 overflow-y-auto p-3 space-y-2">
         {messages.map((m, i) => (
           <div key={i} className={`max-w-[85%] rounded-lg p-2 fade-in ${m.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "mr-auto bg-muted"}`}>

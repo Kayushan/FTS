@@ -2,6 +2,8 @@ export type AiScope = "structurer" | "advisor";
 export type AiStage =
   | "start"
   | "fetch_transactions"
+  | "fetch_debts"
+  | "fetch_borrows"
   | "call_openrouter"
   | "save_insights"
   | "summary_ready"
