@@ -1,5 +1,6 @@
 import { FinancialMath } from './decimal-math';
 import { DateUtils } from './date-utils';
+import { supabase } from './supabase';
 
 export type EntryType = "expense" | "income";
 
@@ -31,11 +32,54 @@ export type Debt = {
   repaymentEntryId?: string;
 };
 
+/**
+ * Validates that the current session is valid and matches stored user ID
+ * @throws Error if session is invalid or mismatched
+ */
+export async function validateUserSession(): Promise<string> {
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  
+  if (authError) {
+    localStorage.clear();
+    throw new Error(`Authentication error: ${authError.message}`);
+  }
+  
+  if (!user) {
+    localStorage.clear();
+    throw new Error('No authenticated user found');
+  }
+  
+  const localUserId = localStorage.getItem("current_user_id");
+  if (localUserId !== user.id) {
+    console.warn('Session mismatch detected:', { localUserId, serverUserId: user.id });
+    localStorage.clear();
+    throw new Error('Session inconsistency detected. Please sign in again.');
+  }
+  
+  return user.id;
+}
+
 function currentUserNs(): string {
   try {
     const uid = localStorage.getItem("current_user_id");
-    return uid ? `user_${uid}_` : "";
-  } catch {
+    
+    // Strict validation: user ID must exist and be valid UUID format
+    if (!uid || uid.length < 32 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uid)) {
+      console.warn('Invalid or missing user ID detected');
+      // Clear potentially corrupted data and force re-authentication
+      localStorage.clear();
+      throw new Error('Authentication required');
+    }
+    
+    return `user_${uid}_`;
+  } catch (error) {
+    console.error('User namespace error:', error);
+    // Force logout/re-authentication by clearing storage
+    localStorage.clear();
+    // Redirect to prevent accessing unnamespaced data
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
     return "";
   }
 }

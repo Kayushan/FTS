@@ -20,7 +20,12 @@ export function useSupabaseAuth() {
       setSession(newSession);
       try {
         const id = newSession?.user?.id;
-        if (id) localStorage.setItem("current_user_id", id);
+        if (id) {
+          localStorage.setItem("current_user_id", id);
+        } else {
+          // Clear all data when user signs out or session becomes invalid
+          localStorage.clear();
+        }
       } catch {}
     });
     return () => {
@@ -40,6 +45,13 @@ export function useSupabaseAuth() {
   }
 
   async function signOut() {
+    // Clear all local data before signing out
+    try {
+      localStorage.clear();
+    } catch (error) {
+      console.warn('Error clearing localStorage during signout:', error);
+    }
+    
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   }

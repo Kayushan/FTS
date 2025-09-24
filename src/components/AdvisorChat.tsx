@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Button } from "./ui/button";
 import { supabase } from "../lib/supabase";
 import { getAdvisorSystem, fetchApiKeysForUser, summarizeLast30Days } from "../lib/ai";
@@ -6,7 +6,7 @@ import { callOpenRouterStream, type ChatMessage } from "../lib/openrouter";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getAiModel } from "../lib/config";
-import { pushAiStatus, useAiStatusFeed } from "../lib/ai_status";
+import { pushAiStatus } from "../lib/ai_status";
 import {
   Activity,
   Loader2,
@@ -16,6 +16,13 @@ import {
   Save,
   Send as SendIcon,
   MessageCircle,
+  Trash2,
+  RefreshCw,
+  Bot,
+  User,
+  Zap,
+  X,
+  ChevronDown
 } from "lucide-react";
 import { useSupabaseAuth } from "../lib/auth";
 import { addEntry, addDebt, addBorrow } from "../lib/storage";
@@ -42,13 +49,62 @@ export function AdvisorChat() {
   const [aiError, setAiError] = useState<AIError | null>(null);
   const [needsRefresh, setNeedsRefresh] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const statusFeed = useAiStatusFeed();
-  const [statusExpanded, setStatusExpanded] = useState<boolean>(false);
   const [showTyping, setShowTyping] = useState<boolean>(false);
   const [superAi, setSuperAi] = useState<boolean>(() => {
     try { return localStorage.getItem("super_ai_enabled") === "1"; } catch { return false; }
   });
   const processedTransactions = useRef<Set<string>>(new Set());
+  const [retryCount, setRetryCount] = useState(0);
+  const maxRetries = 3;
+  const [currentActivity, setCurrentActivity] = useState<string | null>(null);
+  const [responseTime, setResponseTime] = useState<number | null>(null);
+  const activityStartTime = useRef<number | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [showScrollIndicator, setShowScrollIndicator] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  
+  // Auto-scroll to bottom when new messages arrive
+  const autoScrollToBottom = useCallback(() => {
+    requestAnimationFrame(() => {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      }
+    });
+  }, []);
+  
+  // Check if there's content below and show scroll indicator
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const element = e.currentTarget;
+    const isNearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 50;
+    setShowScrollIndicator(!isNearBottom && element.scrollHeight > element.clientHeight);
+  }, []);
+  
+
+  
+  // Enhanced error handling with retry logic
+  const handleRetryableError = useCallback(async (operation: () => Promise<void>, operationName: string) => {
+    try {
+      setError(null);
+      setAiError(null);
+      await operation();
+      setRetryCount(0);
+    } catch (e: any) {
+      const currentRetry = retryCount + 1;
+      setRetryCount(currentRetry);
+      
+      if (e.code && e.retryable && currentRetry < maxRetries) {
+        console.log(`Retrying ${operationName} (attempt ${currentRetry}/${maxRetries})`);
+        setTimeout(() => handleRetryableError(operation, operationName), 2000 * currentRetry);
+        return;
+      }
+      
+      if (e.code) {
+        setAiError(e);
+      } else {
+        setError(`${operationName} failed: ${e?.message ?? 'Unknown error'}`);
+      }
+    }
+  }, [retryCount, maxRetries]);
 
   useEffect(() => {
     if (!user) return;
@@ -75,25 +131,28 @@ export function AdvisorChat() {
   }, [user?.id]);
 
   useEffect(() => {
-    viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight });
-  }, [messages]);
+    autoScrollToBottom();
+  }, [messages, autoScrollToBottom]);
+  
+  useEffect(() => {
+    autoScrollToBottom();
+  }, [showTyping, autoScrollToBottom]);
 
   useEffect(() => {
     saveChat(messages);
   }, [messages]);
+  
+
 
   async function refreshInsights() {
     if (!user) return;
-    try {
+    
+    await handleRetryableError(async () => {
       setGenLoading(true);
-      setError(null);
-      setAiError(null);
-      pushAiStatus({ scope: "structurer", stage: "start", message: "User requested summary refresh" });
+      setCurrentActivity('Analyzing transactions');
+      activityStartTime.current = Date.now();
       
-      await AIErrorHandler.withRetry(
-        () => summarizeLast30Days(user.id),
-        'Refresh insights'
-      );
+      await summarizeLast30Days(user.id);
       
       const { data } = await supabase
         .from("user_insights")
@@ -102,25 +161,38 @@ export function AdvisorChat() {
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
+        
       setInsights(data?.summary ?? null);
       setNeedsRefresh(false);
-    } catch (e: any) {
-      if (e.code) {
-        // It's an AIError from AIErrorHandler
-        setAiError(e);
-      } else {
-        setError(e?.message ?? "Failed to refresh summary");
-      }
-    } finally {
       setGenLoading(false);
-    }
+      
+      // Show response time
+      if (activityStartTime.current) {
+        const responseTime = Date.now() - activityStartTime.current;
+        setResponseTime(responseTime);
+        setCurrentActivity(null);
+        setTimeout(() => setResponseTime(null), 3000); // Clear after 3 seconds
+      }
+    }, 'Refresh insights');
   }
 
   function clearChat() {
+    if (messages.length === 0) return;
+    setShowClearConfirm(true);
+  }
+  
+  function confirmClearChat() {
     setMessages([]);
     saveChat([]);
     processedTransactions.current.clear();
+    setError(null);
+    setAiError(null);
+    setRetryCount(0);
+    AICommandParser.clearProcessedCommands();
+    setShowClearConfirm(false);
   }
+  
+
 
   async function send() {
     if (!user) { setError("Sign in to use AI Advisor"); return; }
@@ -172,10 +244,12 @@ export function AdvisorChat() {
     setShowTyping(true);
     setError(null);
     setAiError(null);
+    setCurrentActivity('Processing your request');
+    activityStartTime.current = Date.now();
+    
     // Clear processed transactions for new conversation
     AICommandParser.clearProcessedCommands();
     processedTransactions.current.clear();
-    pushAiStatus({ scope: "advisor", stage: "sending_question", message: "Sending question to OpenRouter" });
     const systemPrompt = getAdvisorSystem();
     console.log("System prompt being sent to AI:", systemPrompt.content); // Debug log
     
@@ -335,7 +409,15 @@ Due Date: ${command.dueDate}` : ''}`
         }),
         'AI streaming request'
       );
-      pushAiStatus({ scope: "advisor", stage: "received_answer", message: "Received advisor response" });
+      
+      // Show response time
+      if (activityStartTime.current) {
+        const responseTime = Date.now() - activityStartTime.current;
+        setResponseTime(responseTime);
+        setCurrentActivity(null);
+        setTimeout(() => setResponseTime(null), 3000); // Clear after 3 seconds
+      }
+      
       setInput("");
     } finally {
       setLoading(false);
@@ -344,110 +426,323 @@ Due Date: ${command.dueDate}` : ''}`
   }
 
   return (
-    <div className="flex h-[70vh] flex-col rounded-xl border bg-card safe-bottom">
-      <div className="flex items-center justify-between p-3 border-b">
-        <div className="text-sm font-medium">
-          AI Advisor {superAi && <span className="text-green-600">(Super AI Enabled)</span>}
-          <div className="text-xs text-muted-foreground">
-            Today: {getCurrentDateString()} | Processed: {processedTransactions.current.size}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {needsRefresh && <div className="text-xs text-amber-700">Summary outdated or missing</div>}
-          <Button size="sm" variant="outline" onClick={clearChat}>Clear Chat</Button>
-        </div>
-      </div>
-      <div className="p-3 border-b text-xs flex items-center gap-2">
-        <div>Background AI (Structurer):</div>
-        <Button size="sm" onClick={refreshInsights} disabled={genLoading || !user}>
-          {genLoading ? "Running..." : "Run Summary"}
-        </Button>
-        {!user && <span className="text-red-600">Sign in required</span>}
-      </div>
-      {error && <div className="p-3 border-b text-xs text-red-700">{error}</div>}
-      {aiError && (
-        <div className="p-3 border-b">
-          <ApiErrorDisplay
-            error={AIErrorHandler.getUserMessage(aiError)}
-            onRetry={AIErrorHandler.shouldShowRetry(aiError) ? () => {
-              setAiError(null);
-              // Retry the last operation if needed
-            } : undefined}
-            onDismiss={() => setAiError(null)}
-          />
-        </div>
-      )}
-      <div ref={viewportRef} className="flex-1 overflow-y-auto p-3 space-y-2">
-        {messages.map((m, i) => (
-          <div key={i} className={`max-w-[85%] rounded-lg p-2 fade-in ${m.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "mr-auto bg-muted"}`}>
-            {m.role === "assistant" ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-            ) : (
-              m.content
-            )}
-          </div>
-        ))}
-        {showTyping && (
-          <div className="max-w-[85%] mr-auto rounded-lg p-2 bg-muted inline-flex items-center gap-2 text-xs text-muted-foreground fade-in">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Assistant is typing...
-          </div>
-        )}
-        <div className="mt-4">
-          <div className="flex items-center justify-between">
-            <div className="inline-flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <Activity className="h-3 w-3" /> AI Activity
+    <div className="flex h-[80vh] flex-col rounded-2xl border-2 border-border/20 bg-gradient-to-br from-background to-card shadow-2xl overflow-hidden">
+      {/* Enhanced Header */}
+      <div className="bg-gradient-to-r from-primary/5 to-primary/10 border-b border-border/20 backdrop-blur-sm">
+        <div className="flex items-center justify-between p-4">
+          <div className="flex items-center gap-3">
+            <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-gradient-to-br from-primary to-primary/80 shadow-lg">
+              <Bot className="h-4 w-4 text-primary-foreground" />
             </div>
-            <Button size="sm" variant="ghost" onClick={() => setStatusExpanded((v) => !v)}>
-              {statusExpanded ? "Hide" : "Show"}
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-semibold text-foreground">AI Financial Advisor</h3>
+                {superAi && (
+                  <div className="flex items-center gap-1 px-2 py-1 bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-full border border-green-500/30">
+                    <Zap className="h-3 w-3 text-green-600" />
+                    <span className="text-xs font-medium text-green-700">Super AI</span>
+                  </div>
+                )}
+              </div>
+              {(currentActivity || responseTime !== null) && (
+                <div className="text-xs text-muted-foreground mt-0.5">
+                  {currentActivity && (
+                    <span className="text-amber-600">{currentActivity}...</span>
+                  )}
+                  {responseTime !== null && !currentActivity && (
+                    <span className="text-green-600">Response in {responseTime}ms</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {needsRefresh && (
+              <div className="flex items-center gap-1 px-2 py-1 bg-amber-100 rounded-full border border-amber-300">
+                <AlertTriangle className="h-3 w-3 text-amber-600" />
+                <span className="text-xs text-amber-700">Summary outdated</span>
+              </div>
+            )}
+            <Button 
+              size="sm" 
+              variant="outline" 
+              onClick={clearChat}
+              className="hover:bg-destructive/10 hover:text-destructive hover:border-destructive/20"
+            >
+              <Trash2 className="h-3 w-3 mr-1" />
+              Clear
             </Button>
           </div>
-          {statusExpanded && (
-            <ul className="mt-2 space-y-1">
-              {statusFeed.slice(-12).map((ev) => {
-                const icon = ev.stage === "fetch_transactions"
-                  ? <Database className="h-3 w-3" />
-                  : ev.stage === "call_openrouter"
-                  ? <MessageCircle className="h-3 w-3" />
-                  : ev.stage === "save_insights"
-                  ? <Save className="h-3 w-3" />
-                  : ev.stage === "summary_ready"
-                  ? <CheckCircle2 className="h-3 w-3 text-green-600" />
-                  : ev.stage === "sending_question"
-                  ? <SendIcon className="h-3 w-3" />
-                  : ev.stage === "received_answer"
-                  ? <CheckCircle2 className="h-3 w-3 text-green-600" />
-                  : ev.stage === "error"
-                  ? <AlertTriangle className="h-3 w-3 text-red-600" />
-                  : <Loader2 className="h-3 w-3 animate-spin" />;
-                return (
-                  <li key={ev.id} className="text-[11px] text-muted-foreground flex items-center gap-2">
-                    {icon}
-                    <span className="uppercase tracking-wide text-[10px] px-1 py-0.5 rounded bg-muted">{ev.scope}</span>
-                    <span className="text-foreground">{ev.message}</span>
-                    <span className="ml-auto opacity-60">{new Date(ev.time).toLocaleTimeString()}</span>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+        </div>
+        
+        {/* Summary Controls */}
+        <div className="px-4 pb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Database className="h-3 w-3" />
+            <span>Background AI Structurer:</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button 
+              size="sm" 
+              onClick={refreshInsights} 
+              disabled={genLoading || !user}
+              className="h-7 text-xs bg-primary/90 hover:bg-primary px-3"
+            >
+              {genLoading ? (
+                <>
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-3 w-3 mr-1" />
+                  Run Summary
+                </>
+              )}
+            </Button>
+            {!user && (
+              <div className="flex items-center gap-1 px-2 py-1 bg-red-100 rounded-full border border-red-200">
+                <X className="h-3 w-3 text-red-600" />
+                <span className="text-xs text-red-700">Sign in required</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-      <div className="p-3 border-t flex gap-2">
-        <input
-          className="flex-1 rounded-md border px-3 py-2"
-          placeholder="Ask about your spendings..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (!loading && input.trim()) send();
-            }
-          }}
-        />
-        <Button onClick={send} disabled={loading || !input.trim()}>Send</Button>
+
+      {/* Enhanced Error Display */}
+      {(error || aiError) && (
+        <div className="border-b border-border/20 bg-gradient-to-r from-red-50/50 to-orange-50/50">
+          <div className="p-3">
+            {error && (
+              <div className="flex items-center gap-2 text-sm text-red-700">
+                <AlertTriangle className="h-4 w-4" />
+                <span>{error}</span>
+                <Button 
+                  size="sm" 
+                  variant="ghost" 
+                  onClick={() => setError(null)}
+                  className="ml-auto h-6 w-6 p-0 hover:bg-red-100"
+                >
+                  <X className="h-3 w-3" />
+                </Button>
+              </div>
+            )}
+            {aiError && (
+              <ApiErrorDisplay
+                error={AIErrorHandler.getUserMessage(aiError)}
+                onRetry={AIErrorHandler.shouldShowRetry(aiError) ? () => {
+                  setAiError(null);
+                  setRetryCount(0);
+                } : undefined}
+                onDismiss={() => setAiError(null)}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Enhanced Chat Area - Full Space for AI Response */}
+      <div ref={viewportRef} className="flex-1 overflow-hidden p-4 space-y-4 bg-gradient-to-b from-background/50 to-card/30">
+        {messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center space-y-4">
+            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-primary/20 to-primary/10 flex items-center justify-center">
+              <Bot className="h-8 w-8 text-primary/60" />
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold text-foreground mb-2">Welcome to your AI Financial Advisor</h4>
+              <p className="text-sm text-muted-foreground max-w-md leading-relaxed">
+                Ask me about your spending patterns, get financial insights, or let me help manage your transactions.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 justify-center">
+              <button 
+                onClick={() => setInput("How much did I spend this week?")}
+                className="px-3 py-1.5 bg-primary/10 rounded-full text-xs text-primary border border-primary/20 hover:bg-primary/20 hover:border-primary/30 transition-all duration-200 cursor-pointer"
+              >
+                "How much did I spend this week?"
+              </button>
+              <button 
+                onClick={() => setInput("Add expense: lunch RM15")}
+                className="px-3 py-1.5 bg-primary/10 rounded-full text-xs text-primary border border-primary/20 hover:bg-primary/20 hover:border-primary/30 transition-all duration-200 cursor-pointer"
+              >
+                "Add expense: lunch RM15"
+              </button>
+              <button 
+                onClick={() => setInput("Show my spending by category")}
+                className="px-3 py-1.5 bg-primary/10 rounded-full text-xs text-primary border border-primary/20 hover:bg-primary/20 hover:border-primary/30 transition-all duration-200 cursor-pointer"
+              >
+                "Show my spending by category"
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div 
+            className="h-full overflow-y-auto pr-2 space-y-4 pb-24 relative no-scrollbar"
+            onScroll={handleScroll}
+          >
+            {messages.map((m, i) => (
+              <div key={i} className={`flex items-start gap-3 animate-in fade-in-0 slide-in-from-bottom-4 duration-300 ${
+              m.role === "user" ? "flex-row-reverse" : "flex-row"
+            }`}>
+              <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${
+                m.role === "user" 
+                  ? "bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg" 
+                  : "bg-gradient-to-br from-primary to-primary/80 shadow-lg"
+              }`}>
+                {m.role === "user" ? (
+                  <User className="h-4 w-4 text-white" />
+                ) : (
+                  <Bot className="h-4 w-4 text-primary-foreground" />
+                )}
+              </div>
+              <div className={`max-w-[80%] rounded-2xl p-4 shadow-sm border ${
+                m.role === "user" 
+                  ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white border-blue-400/20 shadow-blue-500/20" 
+                  : "bg-gradient-to-br from-card to-background border-border/20 shadow-foreground/5"
+              }`}>
+                {m.role === "assistant" ? (
+                  <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-code:text-foreground prose-pre:bg-muted prose-pre:border prose-pre:border-border/20">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {m.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="text-sm leading-relaxed">{m.content}</p>
+                )}
+              </div>
+            </div>
+            ))}
+            <div ref={messagesEndRef} />
+            
+            {/* Scroll Down Indicator */}
+            {showScrollIndicator && (
+              <div className="absolute bottom-6 right-6 z-10">
+                <Button
+                  size="sm"
+                  onClick={autoScrollToBottom}
+                  className="w-10 h-10 rounded-full bg-primary/90 hover:bg-primary shadow-lg hover:shadow-xl transition-all duration-200 p-0"
+                >
+                  <ChevronDown className="h-4 w-4 text-primary-foreground animate-bounce" />
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+        
+        {showTyping && (
+          <div className="flex items-start gap-3 animate-in fade-in-0 slide-in-from-bottom-4">
+            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary/80 flex items-center justify-center shadow-lg">
+              <Bot className="h-4 w-4 text-primary-foreground" />
+            </div>
+            <div className="bg-gradient-to-br from-card to-background border border-border/20 rounded-2xl p-4 shadow-sm">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>AI is thinking...</span>
+              </div>
+            </div>
+          </div>
+        )}
+        
+
       </div>
+
+      {/* Enhanced Input Area */}
+      <div className="border-t border-border/20 bg-gradient-to-r from-background to-card/50 backdrop-blur-sm">
+        <div className="p-4 flex gap-3">
+          <div className="flex-1 relative">
+            <input
+              className="w-full rounded-xl border-2 border-border/20 bg-background/80 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all duration-200 placeholder:text-muted-foreground/60 shadow-sm"
+              placeholder="Ask about your finances, request insights, or add transactions..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (!loading && input.trim()) send();
+                }
+              }}
+              disabled={loading}
+            />
+            {loading && (
+              <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              </div>
+            )}
+          </div>
+          <Button 
+            onClick={send} 
+            disabled={loading || !input.trim() || !user}
+            className="px-6 py-3 rounded-xl bg-gradient-to-r from-primary to-primary/90 hover:from-primary/90 hover:to-primary shadow-lg hover:shadow-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <SendIcon className="h-4 w-4" />
+            )}
+            <span className="ml-2 hidden sm:inline font-medium">Send</span>
+          </Button>
+        </div>
+        
+        {/* Status Bar */}
+        <div className="px-4 pb-3 flex items-center justify-between text-xs text-muted-foreground">
+          <div className="flex items-center gap-3">
+            <span className="font-medium">Model: {getAiModel()}</span>
+            {!user && (
+              <>
+                <span>•</span>
+                <span className="text-red-600 font-medium">Not authenticated</span>
+              </>
+            )}
+            {user && insights && (
+              <>
+                <span>•</span>
+                <span className="text-green-600 font-medium">Ready</span>
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-green-600 font-medium">● Ready</span>
+          </div>
+        </div>
+      </div>
+      
+      {/* Custom Confirmation Dialog */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in-0 duration-200">
+          <div className="bg-gradient-to-br from-card to-background border-2 border-border/20 rounded-2xl p-6 shadow-2xl max-w-md mx-4 animate-in zoom-in-95 slide-in-from-bottom-4 duration-300">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-destructive/10 flex items-center justify-center">
+                <Trash2 className="h-6 w-6 text-destructive" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-foreground">Clear Chat History</h3>
+                <p className="text-sm text-muted-foreground">This action cannot be undone</p>
+              </div>
+            </div>
+            
+            <p className="text-foreground mb-6 leading-relaxed">
+              Are you sure you want to clear all chat messages? This will permanently delete your conversation history with the AI advisor.
+            </p>
+            
+            <div className="flex gap-3 justify-end">
+              <Button
+                variant="outline"
+                onClick={() => setShowClearConfirm(false)}
+                className="px-6 hover:bg-muted/50"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={confirmClearChat}
+                className="px-6 bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+              >
+                Clear Chat
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

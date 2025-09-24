@@ -81,4 +81,30 @@ body {
   display: none; /* Chrome, Safari, Opera */
 }
 
+/* Custom elegant scrollbars */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: hsl(var(--border) / 0.3);
+  border-radius: 3px;
+  transition: background-color 0.2s ease;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--border) / 0.5);
+}
+.scrollbar-thumb-border\/20::-webkit-scrollbar-thumb {
+  background: hsl(var(--border) / 0.2);
+}
+.scrollbar-track-transparent::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 

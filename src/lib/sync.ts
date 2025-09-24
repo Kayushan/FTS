@@ -4,6 +4,25 @@ import { getHistoryDates, getDayData, getDebts, getBorrows } from "./storage";
 export type SyncStatus = "idle" | "pending" | "success" | "error";
 
 export async function performFullSync(userId: string): Promise<void> {
+  // CRITICAL: Validate userId matches current authenticated session
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  
+  if (authError) {
+    throw new Error(`Authentication error: ${authError.message}`);
+  }
+  
+  if (!user || user.id !== userId) {
+    console.error('Unauthorized sync attempt:', { requestedUserId: userId, currentUserId: user?.id });
+    throw new Error('Unauthorized: User ID mismatch. Please sign in again.');
+  }
+  
+  // Additional validation: ensure local storage user matches
+  const localUserId = localStorage.getItem("current_user_id");
+  if (localUserId !== userId) {
+    console.error('Local storage user ID mismatch:', { localUserId, requestedUserId: userId });
+    localStorage.clear();
+    throw new Error('Session inconsistency detected. Please sign in again.');
+  }
   // Ensure user row exists for FK constraints
   await supabase.from("users").upsert({ id: userId }, { onConflict: "id" });
 
@@ -64,6 +83,25 @@ export async function performFullSync(userId: string): Promise<void> {
 }
 
 export async function eraseAllCloudData(userId: string): Promise<void> {
+  // CRITICAL: Validate userId matches current authenticated session
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  
+  if (authError) {
+    throw new Error(`Authentication error: ${authError.message}`);
+  }
+  
+  if (!user || user.id !== userId) {
+    console.error('Unauthorized data deletion attempt:', { requestedUserId: userId, currentUserId: user?.id });
+    throw new Error('Unauthorized: User ID mismatch. Cannot delete data.');
+  }
+  
+  // Additional validation: ensure local storage user matches
+  const localUserId = localStorage.getItem("current_user_id");
+  if (localUserId !== userId) {
+    console.error('Local storage user ID mismatch during deletion:', { localUserId, requestedUserId: userId });
+    throw new Error('Session inconsistency detected. Cannot delete data.');
+  }
+  
   // Delete child rows first, then user row
   try { await supabase.from("transactions").delete().eq("user_id", userId); } catch {}
   try { await supabase.from("debts").delete().eq("user_id", userId); } catch {}
